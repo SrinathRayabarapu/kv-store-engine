@@ -8,35 +8,33 @@ Inspired by the [Bitcask paper (Riak, 2010)](https://riak.com/assets/bitcask-int
 
 ## Architecture
 
+### What `KVStoreMain` runs today (single-node, network-available)
+
+The shipped JAR wires **TCP clients → `KVServer` → `BitcaskEngine`** directly. This matches the take-home core requirement: a persistent, **network-available** KV engine with a **binary TCP** protocol.
+
 ```
-                          ┌─────────────────────────────────────┐
-                          │           KVServer (NIO TCP)        │
-                          │  Selector thread + Worker pool      │
-                          │  Binary protocol: PUT/GET/DEL/RANGE │
-                          └──────────┬──────────────────────────┘
-                                     │
-                          ┌──────────▼──────────────────────────┐
-                          │         RaftNode (Consensus)        │
-                          │  Leader election, log replication   │
-                          │  Writes → Raft log → majority ACK  │
-                          └──────────┬──────────────────────────┘
-                                     │
-                          ┌──────────▼──────────────────────────┐
-                          │        BitcaskEngine (Storage)      │
-                          │                                     │
-                          │  ┌─────────┐    ┌──────────────┐   │
-                          │  │ KeyDir  │    │  Data Files   │   │
-                          │  │ (CMap)  │◄──►│ (append-only) │   │
-                          │  └─────────┘    └──────────────┘   │
-                          │       ▲          ┌──────────────┐   │
-                          │       └──────────│  Hint Files   │   │
-                          │    (fast rebuild) │ (index only)  │   │
-                          │                  └──────────────┘   │
-                          │         ┌──────────────┐            │
-                          │         │  Compactor    │            │
-                          │         │ (background)  │            │
-                          │         └──────────────┘            │
-                          └─────────────────────────────────────┘
+┌─────────────────────────────────────┐
+│     KVServer (NIO Selector + pool)   │
+│     Binary protocol over TCP         │
+└──────────────┬──────────────────────┘
+               │
+┌──────────────▼──────────────────────┐
+│        BitcaskEngine (storage)       │
+│  KeyDir + append-only DataFiles      │
+│  Hint files + CrashRecovery          │
+│  Compactor (merge / reclaim space)   │
+└─────────────────────────────────────┘
+```
+
+### Raft (replication) — where it lives
+
+**Raft is implemented** (`RaftNode`, `RaftLog`, `RaftRpc`) and **covered by tests** using an in-memory `RaftRpc` transport (`Step8_RaftReplicationTest`). That satisfies the Principal-level bar in our prep docs: leader election, log replication, majority commit, failover, and follower catch-up — **as an algorithmic layer you can demo in tests and in code review**.
+
+It is **not** yet composed with `KVServer` / `KVStoreMain`: there is no TCP-based `RaftRpc`, no `--raft` CLI, and no `REDIRECT_TO_LEADER` responses on the wire. The handbook diagram below is the **target** full stack; see [docs/SUBMISSION_ALIGNMENT.md](docs/SUBMISSION_ALIGNMENT.md) for a checklist mapping.
+
+```
+(Target integration — future work)
+  Client → KVServer → RaftNode → BitcaskEngine
 ```
 
 ### Why Bitcask Over LSM?
@@ -63,7 +61,7 @@ Java NIO's `Selector` model (single thread multiplexing many connections) is the
 | `GET` | O(1) | 1 random read (seek to offset) |
 | `DELETE` | O(1) | 1 sequential append (tombstone) |
 | `ReadKeyRange` | O(n + k log k) | k random reads |
-| `BatchPut` | O(m) | 1 sequential append (m records) |
+| `BatchPut` | O(m) | m sequential appends (single write-lock hold; not one physical disk block) |
 | Compaction | O(n) | Full read + write of live data |
 | Recovery (hint files) | O(keys) | Read hint files only |
 | Recovery (full replay) | O(data) | Read all data files |
@@ -93,34 +91,21 @@ java -jar target/kv-store-engine-1.0.0.jar \
   --data-dir ./data
 ```
 
-### Run 3-Node Raft Cluster
+### Raft cluster (not in the JAR yet)
+
+Multi-process Raft over TCP is **not** wired to `KVStoreMain`. To demonstrate replication for the panel, point reviewers at **`Step8_RaftReplicationTest`** and the `replication` package — or run:
 
 ```bash
-# Terminal 1 — Node 1 (will become leader)
-java -jar target/kv-store-engine-1.0.0.jar \
-  --port 7777 --data-dir ./data/node1 \
-  --raft --node-id 1 --peers localhost:7778,localhost:7779
-
-# Terminal 2 — Node 2
-java -jar target/kv-store-engine-1.0.0.jar \
-  --port 7778 --data-dir ./data/node2 \
-  --raft --node-id 2 --peers localhost:7777,localhost:7779
-
-# Terminal 3 — Node 3
-java -jar target/kv-store-engine-1.0.0.jar \
-  --port 7779 --data-dir ./data/node3 \
-  --raft --node-id 3 --peers localhost:7777,localhost:7778
+mvn test -Dtest=com.kvstore.replication.Step8_RaftReplicationTest
 ```
 
 ### Run Tests
 
 ```bash
-# All tests (excluding performance benchmarks)
-mvn test
-
-# Include performance benchmarks
-mvn test -Dgroups="perf"
+mvn clean test
 ```
+
+**Performance / JMH:** not included yet (Tier 3 in our prep roadmap). The handbook’s “100 clients × 1000 ops” stress target is approximated by **20 clients × 100 ops** in `Step7_NetworkIntegrationTest` (same patterns, lower scale).
 
 ---
 
@@ -161,7 +146,7 @@ Binary TCP protocol (not HTTP). All integers are big-endian.
 | `0x00` | OK |
 | `0x01` | NOT_FOUND |
 | `0x02` | ERROR |
-| `0x03` | REDIRECT (includes leader address for Raft) |
+| `0x03` | RESERVED for future `REDIRECT_TO_LEADER` (not emitted by the server today) |
 
 ---
 
@@ -200,7 +185,7 @@ A tombstone (delete marker) has `ValSize = -1` and zero value bytes.
 | Write concurrency | `ReentrantLock` on active file | Global lock / Lock-free | Per-file lock allows concurrent reads; simpler than lock-free append |
 | Serialization | Custom binary | JSON / Protobuf | Zero dependencies; minimal overhead; self-describing with CRC |
 | Compaction trigger | Dead-bytes ratio > 50% | Timer-based / Manual | Balances write amplification vs. space amplification |
-| fsync policy | Configurable (default: ON_ROTATE) | Always / Never | ON_ROTATE trades small durability window for 10x write throughput |
+| fsync policy | `sync()` on file close / rotation paths | Per-write `force(true)` | Default favors throughput; a dedicated `SyncPolicy` enum is listed as future work in limitations |
 
 ---
 
@@ -214,6 +199,9 @@ A tombstone (delete marker) has `ValSize = -1` and zero value bytes.
 | No auth / TLS | Not in scope | Add via `SSLContext` (standard library) |
 | No read replicas | Simplifies consistency | Follower reads with `ReadIndex` protocol (Raft §6.4) |
 | Raft snapshot not implemented | Time constraint | Required for production to bound log growth |
+| Raft not integrated with `KVServer` / JAR entrypoint | TCP `RaftRpc` + CLI scope | Wire `RequestHandler` → leader `submitWrite`, followers return `0x03` + leader hint |
+| No persistent Raft log / `votedFor` on disk | In-memory only for take-home timebox | Persist `currentTerm`, `votedFor`, log entries (paper §7) |
+| `REDIRECT` status unused | Single-node TCP path only | Implement when Raft is on the wire |
 
 ---
 
@@ -256,7 +244,7 @@ src/main/java/com/kvstore/
 | `Step4_BitcaskEngineTest` | 12 | All 5 API ops, 10K round-trip, overwrites, deletes, batch, file rotation, concurrency |
 | `Step5_CompactionTest` | 6 | Dead space reclamation, read correctness during/after compaction, file cleanup |
 | `Step6_CrashRecoveryTest` | 8 | Hint file recovery, full replay, torn writes, CRC mismatch, multi-file recovery |
-| `Step7_NetworkIntegrationTest` | 7 | TCP PUT/GET/DELETE/RANGE/BATCH, 20 concurrent clients, malformed request handling |
+| `Step7_NetworkIntegrationTest` | 7 | TCP PUT/GET/DELETE/RANGE/BATCH, **20×100** concurrent load (handbook target was 100×1000 — same style, smaller scale) |
 | `Step8_RaftReplicationTest` | 8 | Leader election, majority ACK, failover, follower catch-up, write ordering |
 
 ---

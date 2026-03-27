@@ -1,7 +1,5 @@
 package com.kvstore.replication;
 
-import java.io.Serializable;
-
 /**
  * A single entry in the Raft replicated log.
  *
