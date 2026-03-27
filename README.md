@@ -244,6 +244,23 @@ src/main/java/com/kvstore/
 
 ---
 
+## Test Summary
+
+**69 tests across 8 test suites — all green.**
+
+| Suite | Tests | What It Verifies |
+|---|---|---|
+| `Step1_RecordSerializerTest` | 10 | Binary encode/decode, CRC32, tombstones, corruption detection, 1MB values |
+| `Step2_DataFileTest` | 8 | Append-only writes, positional reads, persistence, 100 concurrent writers |
+| `Step3_KeyDirTest` | 10 | O(1) put/get, sorted range queries, 100K concurrent reads, atomic snapshot |
+| `Step4_BitcaskEngineTest` | 12 | All 5 API ops, 10K round-trip, overwrites, deletes, batch, file rotation, concurrency |
+| `Step5_CompactionTest` | 6 | Dead space reclamation, read correctness during/after compaction, file cleanup |
+| `Step6_CrashRecoveryTest` | 8 | Hint file recovery, full replay, torn writes, CRC mismatch, multi-file recovery |
+| `Step7_NetworkIntegrationTest` | 7 | TCP PUT/GET/DELETE/RANGE/BATCH, 20 concurrent clients, malformed request handling |
+| `Step8_RaftReplicationTest` | 8 | Leader election, majority ACK, failover, follower catch-up, write ordering |
+
+---
+
 ## References
 
 - [Bitcask: A Log-Structured Hash Table for Fast Key/Value Data (Riak, 2010)](https://riak.com/assets/bitcask-intro.pdf)
