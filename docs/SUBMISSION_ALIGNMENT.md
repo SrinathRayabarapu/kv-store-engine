@@ -1,6 +1,6 @@
 # Alignment with Moniepoint take-home prep (internal checklist)
 
-This document maps [kv-store-engine](https://github.com/SrinathRayabarapu/kv-store-engine) to the expectations captured in our prep materials under `java-examples/docs/system-design/prep/fintech/moniepoint/` (README + `KV_Engine_Technical_Handbook.md` + `Moniepoint_Interview_Intelligence.md`).
+This document maps [kv-store-engine](https://github.com/SrinathRayabarapu/kv-store-engine) to the expectations in `java-examples/docs/system-design/prep/fintech/moniepoint/` (README + `KV_Engine_Technical_Handbook.md` + `Moniepoint_Interview_Intelligence.md`).
 
 ## Tier 1 — Core (must ship)
 
@@ -13,42 +13,49 @@ This document maps [kv-store-engine](https://github.com/SrinathRayabarapu/kv-sto
 | Compaction + tests | Met | `Compactor`, `Step5_CompactionTest` |
 | Crash recovery + tests | Met | `CrashRecovery`, `HintFile`, `Step6_CrashRecoveryTest` |
 | KVServer (NIO TCP) + integration tests | Met | `KVServer`, `Protocol`, `Step7_NetworkIntegrationTest` |
-| README — architecture, decisions, run | Met | Root `README.md` (updated for honest scope) |
+| README — architecture, decisions, run | Met | Root `README.md` |
 
-### Handbook nuance — network load test
+### Handbook — network load test
 
 - **Handbook:** 100 concurrent clients × 1,000 ops each, zero errors.  
-- **Repo:** 20 clients × 100 ops — same concurrency pattern, lower scale. Acceptable for CI time; **say this explicitly in the panel** if asked about load.
+- **Repo:** `Step7_NetworkIntegrationTest#stress_100Clients_1000Ops_handbookScale` — **100 × 1,000** PUT+GET pairs (200k RPC round-trips). Prints timing to stderr; README documents a sample observation.
 
-### Handbook nuance — hint recovery “5× faster”
+### Handbook — hint recovery “5× faster”
 
-- **Handbook:** Hint recovery at least 5× faster than full replay on a 100 MB dataset.  
-- **Repo:** Correctness of both paths is tested; **no fixed-size timing assertion** in CI. Optional follow-up: add a `@Tag("perf")` or JMH micro-benchmark.
+- **Repo:** Correctness of hint vs replay is tested; **no automated 5× timing assertion**. Optional: add a dedicated perf test on a fixed dataset size.
 
 ## Tier 2 — Replication (Principal differentiator)
 
 | Item | Status | Evidence |
 |------|--------|----------|
-| Raft leader election | Met (tests) | `RaftNode`, `Step8_RaftReplicationTest` |
-| Raft log replication + majority ACK | Met (tests) | `submitWrite`, `advanceCommitIndex`, same suite |
-| Failover + follower catch-up | Met (tests) | Partition / heal scenarios in `Step8_RaftReplicationTest` |
-| **TCP Raft RPC + multi-JAR cluster** | **Not in entrypoint** | No `--raft` in `KVStoreMain`; no `RaftRpc` over sockets |
+| Raft leader election | Met | `RaftNode`, `Step8_RaftReplicationTest`, live cluster |
+| Raft log replication + majority ACK | Met | `submitWrite`, `advanceCommitIndex`, tests |
+| Failover + follower catch-up | Met | `Step8_RaftReplicationTest` |
+| **TCP Raft + multi-process demo** | Met | `TcpRaftRpc`, `RaftRpcServer`, `RaftWireCodec`, `KVStoreMain` cluster CLI |
+| **Client redirect from follower** | Met | `Protocol.STATUS_REDIRECT`, `RaftRouting`, `RequestHandler` |
 
-**Interview framing:** Glassdoor signal was “implement replication” — we **did**, in production-quality Java with explicit safety discussion, but **transport integration** is the honest gap. Offer the next step: `SocketRaftRpc` + leader redirect in `Protocol`.
+**Tests:** `Step9_RaftTcpClusterIntegrationTest` — three nodes, real sockets on loopback, follower returns REDIRECT then client writes on leader.
 
-## Non-negotiable constraints (prep README)
+## Tier 3 — Polish (nice to have)
+
+| Item | Status |
+|------|--------|
+| JMH microbenchmarks | Not added (see README “What is JMH?” — optional follow-up) |
+| Raft snapshot | Not implemented |
+| Configurable fsync policy enum | Not implemented (documented as future work) |
+
+## Non-negotiable constraints
 
 | Constraint | Status |
 |------------|--------|
-| Standard library only in **main** sources | Met — only `java.*` / `javax.*` + `com.kvstore.*` |
-| JUnit in **test** scope only | Met — `pom.xml` |
-| Binary TCP, not HTTP | Met — `Protocol` + `KVServer` |
-| TDD / stepwise tests | Met — `Step1`…`Step8` suites + commit history |
+| Standard library only in **main** sources | Met |
+| JUnit in **test** scope only | Met |
+| Binary TCP for **client** KV protocol | Met |
+| Binary TCP for **Raft** (separate port) | Met |
 
-## What to say in the deep-dive
+## Deep-dive talking points
 
-1. **Write path:** lock order (`BitcaskEngine` write lock → append → `KeyDir`); CRC scope in `RecordSerializer`.  
-2. **Read path:** `ConcurrentHashMap` + positional `FileChannel.read`.  
-3. **Recovery:** hint vs replay; torn tail + CRC on last record of last file.  
-4. **Raft:** election timeout randomization, log matching + `truncateAndAppend`, commit rule (majority, same term).  
-5. **Gap:** persistent Raft state and TCP RPC — deliberate timebox; path to production listed in README limitations.
+1. **Single-node write path:** `BitcaskEngine` lock → append → `KeyDir`.  
+2. **Cluster write path:** leader `submitWrite` → replicate via `TcpRaftRpc` → majority → complete future → apply loop → `engine.put`.  
+3. **Follower client:** `RaftRouting.redirectIfNotLeader()` → `encodeRedirect(host, port)`.  
+4. **Gaps for production:** persist Raft state; snapshots; TLS; JMH p99 latency.

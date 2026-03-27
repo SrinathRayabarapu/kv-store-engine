@@ -8,34 +8,40 @@ Inspired by the [Bitcask paper (Riak, 2010)](https://riak.com/assets/bitcask-int
 
 ## Architecture
 
-### What `KVStoreMain` runs today (single-node, network-available)
+### Single-node mode (default)
 
-The shipped JAR wires **TCP clients → `KVServer` → `BitcaskEngine`** directly. This matches the take-home core requirement: a persistent, **network-available** KV engine with a **binary TCP** protocol.
+**TCP clients → `KVServer` → `BitcaskEngine`**. No Raft overhead.
 
 ```
 ┌─────────────────────────────────────┐
-│     KVServer (NIO Selector + pool)   │
-│     Binary protocol over TCP         │
+│     KVServer (NIO Selector + pool)  │
 └──────────────┬──────────────────────┘
                │
 ┌──────────────▼──────────────────────┐
-│        BitcaskEngine (storage)       │
-│  KeyDir + append-only DataFiles      │
-│  Hint files + CrashRecovery          │
-│  Compactor (merge / reclaim space)   │
+│        BitcaskEngine (storage)      │
 └─────────────────────────────────────┘
 ```
 
-### Raft (replication) — where it lives
+### Multi-node mode (`--node-id` + `--raft-port` + `--peer`)
 
-**Raft is implemented** (`RaftNode`, `RaftLog`, `RaftRpc`) and **covered by tests** using an in-memory `RaftRpc` transport (`Step8_RaftReplicationTest`). That satisfies the Principal-level bar in our prep docs: leader election, log replication, majority commit, failover, and follower catch-up — **as an algorithmic layer you can demo in tests and in code review**.
+**TCP clients → `KVServer` → `RequestHandler` → (if leader) `RaftNode.submitWrite` → replicated log → apply to `BitcaskEngine`.**  
+Followers return **`STATUS_REDIRECT` (0x03)** with the leader’s **client** `host:port` so clients can retry on the leader.
 
-It is **not** yet composed with `KVServer` / `KVStoreMain`: there is no TCP-based `RaftRpc`, no `--raft` CLI, and no `REDIRECT_TO_LEADER` responses on the wire. The handbook diagram below is the **target** full stack; see [docs/SUBMISSION_ALIGNMENT.md](docs/SUBMISSION_ALIGNMENT.md) for a checklist mapping.
+Raft peers talk on a **separate TCP port** (`--raft-port`) using `RaftWireCodec` + `TcpRaftRpc` + `RaftRpcServer` (RequestVote / AppendEntries).
 
 ```
-(Target integration — future work)
-  Client → KVServer → RaftNode → BitcaskEngine
+┌──────────────┐     Raft RPC      ┌──────────────┐
+│   Node 2     │◄────────────────►│   Node 1     │
+│ KV + Raft    │                  │ KV + Raft    │
+└──────┬───────┘                  └──────┬───────┘
+       │                                 │
+       └──────────── Raft RPC ───────────┘
+                    Node 3
+
+Per node:  Client KV protocol (--port)     Raft protocol (--raft-port)
 ```
+
+**Integration tests:** `Step8_RaftReplicationTest` (in-memory RPC, fast), `Step9_RaftTcpClusterIntegrationTest` (real TCP on loopback, three nodes in one JVM).
 
 ### Why Bitcask Over LSM?
 
@@ -83,7 +89,7 @@ Where: n = total keys, k = keys in range, m = batch size.
 mvn clean package -DskipTests
 ```
 
-### Run Single Node
+### Run single node
 
 ```bash
 java -jar target/kv-store-engine-1.0.0.jar \
@@ -91,21 +97,57 @@ java -jar target/kv-store-engine-1.0.0.jar \
   --data-dir ./data
 ```
 
-### Raft cluster (not in the JAR yet)
+### Run a 3-node Raft cluster (three terminals)
 
-Multi-process Raft over TCP is **not** wired to `KVStoreMain`. To demonstrate replication for the panel, point reviewers at **`Step8_RaftReplicationTest`** and the `replication` package — or run:
+Use **one process per node**. Each peer is `id@host:raftPort:clientPort` (Raft RPC port first, then KV client port).
 
 ```bash
-mvn test -Dtest=com.kvstore.replication.Step8_RaftReplicationTest
+# Terminal 1
+java -jar target/kv-store-engine-1.0.0.jar \
+  --node-id 1 --port 7777 --raft-port 9777 --data-dir ./data/n1 \
+  --advertise-host 127.0.0.1 \
+  --peer 2@127.0.0.1:9778:7778 --peer 3@127.0.0.1:9779:7779
+
+# Terminal 2
+java -jar target/kv-store-engine-1.0.0.jar \
+  --node-id 2 --port 7778 --raft-port 9778 --data-dir ./data/n2 \
+  --advertise-host 127.0.0.1 \
+  --peer 1@127.0.0.1:9777:7777 --peer 3@127.0.0.1:9779:7779
+
+# Terminal 3
+java -jar target/kv-store-engine-1.0.0.jar \
+  --node-id 3 --port 7779 --raft-port 9779 --data-dir ./data/n3 \
+  --advertise-host 127.0.0.1 \
+  --peer 1@127.0.0.1:9777:7777 --peer 2@127.0.0.1:9778:7778
 ```
 
-### Run Tests
+Point a test client at **any** node: writes to a **follower** receive `0x03 REDIRECT` + leader host/port; retry on the leader. Reads are also directed to the leader for a simple linearizable story.
+
+### Run tests
 
 ```bash
 mvn clean test
 ```
 
-**Performance / JMH:** not included yet (Tier 3 in our prep roadmap). The handbook’s “100 clients × 1000 ops” stress target is approximated by **20 clients × 100 ops** in `Step7_NetworkIntegrationTest` (same patterns, lower scale).
+TCP cluster smoke test only:
+
+```bash
+mvn test -Dtest=com.kvstore.network.Step9_RaftTcpClusterIntegrationTest
+```
+
+### Load test (handbook scale) — measured numbers
+
+`Step7_NetworkIntegrationTest#stress_100Clients_1000Ops_handbookScale` runs **100 concurrent clients × 1,000 PUT+GET pairs** (200,000 KV RPC round-trips) against a **single-node** server and prints a line to **stderr**:
+
+```
+STRESS_BENCHMARK clientCount=100 opsPerClient=1000 totalRpcRoundTrips=200000 wallMs=... aggregateKiloRpcPerSec=...
+```
+
+**Sample run** (developer laptop, Java 21, local SSD, March 2026): **~1.4 s** wall time, **~142 kRPC/s** aggregate (PUT+GET counted as two RPCs). Your hardware and CI will differ — re-run the test and copy the line for your README when publishing.
+
+### What is JMH? (Tier 3 — optional)
+
+**JMH** (Java Microbenchmark Harness) is the standard OpenJDK tool for **microbenchmarks**: it warms up the JVM, forks processes, and avoids common benchmarking pitfalls so you can publish trustworthy **per-operation latency** (e.g. p99 `GET` nanos). We have **not** added a JMH module here to keep the build dependency-free; the stress test above is a **macro** load test. Adding JMH would mean a separate Maven profile or module with `org.openjdk.jmh:jmh-core` **test** dependencies and annotated benchmark classes — reasonable follow-up if interviewers ask for p50/p99 numbers.
 
 ---
 
@@ -146,7 +188,7 @@ Binary TCP protocol (not HTTP). All integers are big-endian.
 | `0x00` | OK |
 | `0x01` | NOT_FOUND |
 | `0x02` | ERROR |
-| `0x03` | RESERVED for future `REDIRECT_TO_LEADER` (not emitted by the server today) |
+| `0x03` | **REDIRECT** — payload: `hostLen(4) + host UTF-8 + clientPort(4)` (leader KV endpoint); emitted when not leader in cluster mode |
 
 ---
 
@@ -199,9 +241,7 @@ A tombstone (delete marker) has `ValSize = -1` and zero value bytes.
 | No auth / TLS | Not in scope | Add via `SSLContext` (standard library) |
 | No read replicas | Simplifies consistency | Follower reads with `ReadIndex` protocol (Raft §6.4) |
 | Raft snapshot not implemented | Time constraint | Required for production to bound log growth |
-| Raft not integrated with `KVServer` / JAR entrypoint | TCP `RaftRpc` + CLI scope | Wire `RequestHandler` → leader `submitWrite`, followers return `0x03` + leader hint |
-| No persistent Raft log / `votedFor` on disk | In-memory only for take-home timebox | Persist `currentTerm`, `votedFor`, log entries (paper §7) |
-| `REDIRECT` status unused | Single-node TCP path only | Implement when Raft is on the wire |
+| No persistent Raft log / `votedFor` on disk | In-memory only for take-home timebox | Persist `currentTerm`, `votedFor`, log entries (Raft paper §7) |
 
 ---
 
@@ -220,21 +260,25 @@ src/main/java/com/kvstore/
 │   └── Compactor.java              Background dead-space reclamation
 ├── network/
 │   ├── KVServer.java               NIO TCP server (Selector + worker pool)
-│   ├── Protocol.java               Wire format codec
-│   └── RequestHandler.java         Dispatches protocol ops to engine
+│   ├── Protocol.java               Wire format codec (incl. REDIRECT payload)
+│   ├── RequestHandler.java         Engine + optional Raft leader routing
+│   └── RaftRouting.java            Follower → REDIRECT to leader client address
 ├── replication/
 │   ├── RaftNode.java               Raft state machine (leader/follower/candidate)
 │   ├── RaftLog.java                Replicated log entries
 │   ├── LogEntry.java               Single log entry (term, index, operation)
-│   └── RaftRpc.java                RequestVote + AppendEntries RPCs
-└── KVStoreMain.java                Entry point with CLI argument parsing
+│   ├── RaftRpc.java                RequestVote + AppendEntries RPC interface
+│   ├── RaftWireCodec.java          Binary Raft RPC encode/decode
+│   ├── TcpRaftRpc.java             Outbound Raft RPC over TCP
+│   └── RaftRpcServer.java          Inbound Raft TCP server
+└── KVStoreMain.java                Entry point (single-node or cluster CLI)
 ```
 
 ---
 
 ## Test Summary
 
-**69 tests across 8 test suites — all green.**
+**71 tests across 9 test suites — all green.**
 
 | Suite | Tests | What It Verifies |
 |---|---|---|
@@ -244,8 +288,9 @@ src/main/java/com/kvstore/
 | `Step4_BitcaskEngineTest` | 12 | All 5 API ops, 10K round-trip, overwrites, deletes, batch, file rotation, concurrency |
 | `Step5_CompactionTest` | 6 | Dead space reclamation, read correctness during/after compaction, file cleanup |
 | `Step6_CrashRecoveryTest` | 8 | Hint file recovery, full replay, torn writes, CRC mismatch, multi-file recovery |
-| `Step7_NetworkIntegrationTest` | 7 | TCP PUT/GET/DELETE/RANGE/BATCH, **20×100** concurrent load (handbook target was 100×1000 — same style, smaller scale) |
-| `Step8_RaftReplicationTest` | 8 | Leader election, majority ACK, failover, follower catch-up, write ordering |
+| `Step7_NetworkIntegrationTest` | 8 | TCP protocol; **20×100** concurrent load; **100×1000** handbook stress + stderr benchmark line |
+| `Step8_RaftReplicationTest` | 8 | Raft with in-memory RPC: election, replication, failover, catch-up |
+| `Step9_RaftTcpClusterIntegrationTest` | 1 | **3-node Raft over real TCP** (loopback): follower `REDIRECT`, write on leader |
 
 ---
 

@@ -260,6 +260,7 @@ public class RaftNode implements Closeable {
      */
     private void advanceCommitIndex() {
         long lastIdx = log.lastIndex();
+        long newCommit = commitIndex;
         for (long n = lastIdx; n > commitIndex; n--) {
             if (log.termAt(n) != currentTerm) continue;
 
@@ -272,15 +273,19 @@ public class RaftNode implements Closeable {
 
             int majority = (peerIds.size() + 1) / 2 + 1;
             if (replicatedCount >= majority) {
-                commitIndex = n;
-                // Complete pending write futures
-                for (long idx = lastApplied + 1; idx <= commitIndex; idx++) {
-                    CompletableFuture<Boolean> future = pendingWrites.remove(idx);
-                    if (future != null) {
-                        future.complete(true);
-                    }
-                }
+                newCommit = n;
                 break;
+            }
+        }
+        if (newCommit > commitIndex) {
+            long oldCommit = commitIndex;
+            commitIndex = newCommit;
+            // Complete futures for newly committed indices (not lastApplied — that tracks apply lag)
+            for (long idx = oldCommit + 1; idx <= commitIndex; idx++) {
+                CompletableFuture<Boolean> future = pendingWrites.remove(idx);
+                if (future != null) {
+                    future.complete(true);
+                }
             }
         }
     }

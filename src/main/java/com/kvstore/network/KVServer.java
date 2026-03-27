@@ -39,14 +39,25 @@ public class KVServer implements Closeable {
     private final RequestHandler handler;
     private final AtomicBoolean running = new AtomicBoolean(false);
 
+    /**
+     * @param handler fully built handler (plain engine-only or Raft-aware)
+     */
+    public static KVServer withHandler(int port, RequestHandler handler) {
+        return new KVServer(port, handler);
+    }
+
     private Selector selector;
     private ServerSocketChannel serverChannel;
     private ExecutorService workerPool;
     private Thread selectorThread;
 
     public KVServer(int port, StorageEngine engine) {
+        this(port, new RequestHandler(engine));
+    }
+
+    public KVServer(int port, RequestHandler handler) {
         this.port = port;
-        this.handler = new RequestHandler(engine);
+        this.handler = handler;
     }
 
     /**
