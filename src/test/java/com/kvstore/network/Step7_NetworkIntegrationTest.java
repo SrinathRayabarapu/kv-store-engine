@@ -11,6 +11,7 @@ import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
@@ -133,6 +134,63 @@ class Step7_NetworkIntegrationTest {
         }
     }
 
+    /**
+     * Handbook target: 100 concurrent TCP clients × 1,000 PUT+GET pairs each (200k RPC round-trips).
+     * Prints wall-clock ms and aggregate throughput to stderr for documenting in README.
+     */
+    @Test
+    @Timeout(value = 30, unit = TimeUnit.MINUTES)
+    @DisplayName("Stress: 100 clients × 1000 ops each (handbook-scale load test)")
+    void stress_100Clients_1000Ops_handbookScale() throws Exception {
+        int clientCount = 100;
+        int opsPerClient = 1000;
+        long t0 = System.nanoTime();
+        ExecutorService executor = Executors.newFixedThreadPool(clientCount);
+        List<Future<Boolean>> futures = new ArrayList<>();
+
+        for (int c = 0; c < clientCount; c++) {
+            final int clientId = c;
+            futures.add(executor.submit(() -> {
+                try (SocketChannel client = connect()) {
+                    for (int i = 0; i < opsPerClient; i++) {
+                        String key = "s" + clientId + "-k" + i;
+                        byte[] value = ("v" + i).getBytes();
+                        send(client, Protocol.encodePutRequest(key, value));
+                        Protocol.ParsedResponse putResp = readResponse(client, 120_000);
+                        if (putResp.status() != Protocol.STATUS_OK) {
+                            return false;
+                        }
+                        send(client, Protocol.encodeGetRequest(key));
+                        Protocol.ParsedResponse getResp = readResponse(client, 120_000);
+                        if (getResp.status() != Protocol.STATUS_OK) {
+                            return false;
+                        }
+                        if (!Arrays.equals(value, getResp.payload())) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+            }));
+        }
+
+        executor.shutdown();
+        assertTrue(executor.awaitTermination(25, TimeUnit.MINUTES));
+
+        for (Future<Boolean> f : futures) {
+            assertTrue(f.get(), "A stress client failed");
+        }
+
+        long wallMs = (System.nanoTime() - t0) / 1_000_000L;
+        long totalOps = (long) clientCount * opsPerClient * 2L;
+        double aggKops = totalOps / (wallMs / 1000.0) / 1000.0;
+        System.err.println("STRESS_BENCHMARK clientCount=" + clientCount
+                + " opsPerClient=" + opsPerClient
+                + " totalRpcRoundTrips=" + totalOps
+                + " wallMs=" + wallMs
+                + " aggregateKiloRpcPerSec=" + String.format("%.2f", aggKops));
+    }
+
     @Test
     @DisplayName("Multiple concurrent clients perform operations without errors")
     void concurrentClients_noErrors() throws Exception {
@@ -208,8 +266,12 @@ class Step7_NetworkIntegrationTest {
     }
 
     private Protocol.ParsedResponse readResponse(SocketChannel channel) throws IOException {
+        return readResponse(channel, 5_000);
+    }
+
+    private Protocol.ParsedResponse readResponse(SocketChannel channel, int timeoutMs) throws IOException {
         ByteBuffer headerBuf = ByteBuffer.allocate(5);
-        readFully(channel, headerBuf);
+        readFully(channel, headerBuf, timeoutMs);
         headerBuf.flip();
         byte status = headerBuf.get();
         int payloadLen = headerBuf.getInt();
@@ -217,14 +279,14 @@ class Step7_NetworkIntegrationTest {
         byte[] payload = new byte[payloadLen];
         if (payloadLen > 0) {
             ByteBuffer payloadBuf = ByteBuffer.wrap(payload);
-            readFully(channel, payloadBuf);
+            readFully(channel, payloadBuf, timeoutMs);
         }
 
         return new Protocol.ParsedResponse(status, payload);
     }
 
-    private void readFully(SocketChannel channel, ByteBuffer buffer) throws IOException {
-        long deadline = System.currentTimeMillis() + 5000;
+    private void readFully(SocketChannel channel, ByteBuffer buffer, int timeoutMs) throws IOException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
         while (buffer.hasRemaining()) {
             if (System.currentTimeMillis() > deadline) {
                 throw new IOException("Read timeout");

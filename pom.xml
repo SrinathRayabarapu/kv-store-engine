@@ -52,8 +52,6 @@
                     <includes>
                         <include>**/*Test.java</include>
                     </includes>
-                    <!-- Exclude performance tests from default build -->
-                    <excludedGroups>perf</excludedGroups>
                 </configuration>
             </plugin>
 

@@ -1,5 +1,6 @@
 package com.kvstore.network;
 
+import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -139,6 +140,30 @@ public final class Protocol {
 
     public static byte[] encodeError(String message) {
         return encodeResponse(STATUS_ERROR, message.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Redirect payload: {@code hostUtf8Len(4) + hostBytes + clientPort(4 big-endian)}.
+     * Clients reconnect to this host:port for linearizable reads/writes through the leader.
+     */
+    public static byte[] encodeRedirect(String leaderHost, int leaderClientPort) {
+        byte[] hb = leaderHost.getBytes(StandardCharsets.UTF_8);
+        ByteBuffer buf = ByteBuffer.allocate(4 + hb.length + 4);
+        buf.putInt(hb.length);
+        buf.put(hb);
+        buf.putInt(leaderClientPort);
+        return encodeResponse(STATUS_REDIRECT, buf.array());
+    }
+
+    /** Parses {@link #encodeRedirect} payload (status byte already stripped). */
+    public static InetSocketAddress decodeRedirectPayload(byte[] payload) {
+        ByteBuffer buf = ByteBuffer.wrap(payload);
+        int hlen = buf.getInt();
+        byte[] hb = new byte[hlen];
+        buf.get(hb);
+        int port = buf.getInt();
+        String host = new String(hb, StandardCharsets.UTF_8);
+        return new InetSocketAddress(host, port);
     }
 
     /**
