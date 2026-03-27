@@ -92,6 +92,10 @@ public class BitcaskEngine implements StorageEngine {
 
         writeLock.lock();
         try {
+            // Track dead bytes from the overwritten entry (if any) for compaction threshold
+            keyDir.get(key).ifPresent(oldEntry ->
+                    deadBytesPerFile.merge(oldEntry.fileId(), (long) oldEntry.recordSize(), Long::sum));
+
             rotateIfNeeded(recordSize);
             long offset = activeFile.append(record);
             keyDir.put(key, new KeyDirEntry(
@@ -250,6 +254,14 @@ public class BitcaskEngine implements StorageEngine {
 
     void setActiveFile(DataFile df) {
         this.activeFile = df;
+    }
+
+    /**
+     * Removes a data file from the engine's tracked file map.
+     * Used by the compactor after successfully merging old files.
+     */
+    void removeDataFile(String fileId) {
+        dataFiles.remove(fileId);
     }
 
     /**
