@@ -60,6 +60,10 @@ public class BitcaskEngine implements StorageEngine {
     /**
      * Opens or creates a BitcaskEngine rooted at the given directory.
      *
+     * <p>If existing data files are found, the engine defers to
+     * {@link CrashRecovery#recover(BitcaskEngine)} to rebuild state.
+     * Otherwise, a fresh active data file is created.
+     *
      * @param dataDir     the directory for data files (created if absent)
      * @param maxFileSize max bytes per data file before rotation
      */
@@ -73,7 +77,11 @@ public class BitcaskEngine implements StorageEngine {
             throw new UncheckedIOException("Cannot create data directory: " + dataDir, e);
         }
         this.fileIdSeq = new AtomicLong(discoverMaxFileId() + 1);
-        this.activeFile = openNewDataFile();
+
+        // Only create a new file for a fresh engine — recovery sets the active file
+        if (fileIdSeq.get() == 1) {
+            this.activeFile = openNewDataFile();
+        }
     }
 
     /** Convenience constructor with default max file size. */
