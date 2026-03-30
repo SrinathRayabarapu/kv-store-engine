@@ -170,19 +170,23 @@ class Step8_RaftReplicationTest {
                 .orElseThrow();
         rpc.partitioned.add(slowFollower.getNodeId());
 
-        // Write while the follower is partitioned
+        // Write while the follower is partitioned — must await majority commit so the
+        // leader log is stable before heal (CI runners are slower than local dev).
+        List<CompletableFuture<Boolean>> catchUpWrites = new ArrayList<>();
         for (int i = 0; i < 5; i++) {
-            leader.submitWrite(LogEntry.OP_PUT, "catch-up-" + i, ("v" + i).getBytes());
+            catchUpWrites.add(leader.submitWrite(LogEntry.OP_PUT, "catch-up-" + i, ("v" + i).getBytes()));
         }
-        Thread.sleep(1000); // let replication happen to the other follower
+        for (CompletableFuture<Boolean> f : catchUpWrites) {
+            assertTrue(f.get(30, TimeUnit.SECONDS), "each write should commit while one follower is partitioned");
+        }
+        // Other follower + leader need time to replicate (heartbeats are 150ms; allow slack for CI).
+        Thread.sleep(500);
 
-        // Heal the partition
+        // Heal the partition — follower may have started elections while isolated; cluster
+        // must converge via further AppendEntries. Poll instead of a fixed short sleep.
         rpc.partitioned.remove(slowFollower.getNodeId());
-        Thread.sleep(2000); // let the follower catch up
-
-        // The slow follower's log should have caught up
-        assertTrue(slowFollower.getLog().lastIndex() >= 5,
-                "Slow follower should catch up: lastIndex="
+        assertTrue(awaitLogCaughtUp(slowFollower, 5, 30_000),
+                "Slow follower should catch up within timeout: lastIndex="
                         + slowFollower.getLog().lastIndex());
     }
 
@@ -245,5 +249,17 @@ class Step8_RaftReplicationTest {
         }
         fail("No leader elected within " + timeoutMs + "ms");
         return null;
+    }
+
+    /** Waits until {@code node}'s replicated log reaches at least {@code minLastIndex} (polls, CI-safe). */
+    private boolean awaitLogCaughtUp(RaftNode node, long minLastIndex, long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (node.getLog().lastIndex() >= minLastIndex) {
+                return true;
+            }
+            Thread.sleep(100);
+        }
+        return false;
     }
 }
