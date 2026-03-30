@@ -83,14 +83,17 @@ class Step9_RaftTcpClusterIntegrationTest {
         assertTrue(followerKvPort > 0);
 
         try (SocketChannel fc = openClient(followerKvPort)) {
+            // testing follower redirect
             send(fc, Protocol.encodePutRequest("cluster-key", "from-test".getBytes()));
             Protocol.ParsedResponse redir = readResp(fc, 30_000);
             assertEquals(Protocol.STATUS_REDIRECT, redir.status(), "follower should redirect writes");
+
             InetSocketAddress leaderAddr = Protocol.decodeRedirectPayload(redir.payload());
             try (SocketChannel lc = openClient(leaderAddr.getPort())) {
                 send(lc, Protocol.encodePutRequest("cluster-key", "from-test".getBytes()));
                 Protocol.ParsedResponse ok = readResp(lc, 30_000);
                 assertEquals(Protocol.STATUS_OK, ok.status());
+
                 // Apply loop runs every 10ms — allow state machine to catch up before GET
                 String value = null;
                 long deadline = System.currentTimeMillis() + 10_000;
