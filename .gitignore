@@ -18,3 +18,7 @@ Thumbs.db
 
 # KV Store data directories (created at runtime)
 data/
+demo/
+
+# Demo script PID files and logs
+scripts/run/

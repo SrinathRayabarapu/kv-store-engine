@@ -82,6 +82,7 @@ Where: n = total keys, k = keys in range, m = batch size.
 
 - Java 21+
 - Maven 3.8+
+- Python 3 (optional — only for `scripts/kv_client.py` and the demo shell scripts below)
 
 ### Build
 
@@ -122,6 +123,52 @@ java -jar target/kv-store-engine-1.0.0.jar \
 ```
 
 Point a test client at **any** node: writes to a **follower** receive `0x03 REDIRECT` + leader host/port; retry on the leader. Reads are also directed to the leader for a simple linearizable story.
+
+### Demo scripts (single-node and Raft cluster)
+
+These live under `scripts/` and use **`scripts/kv_client.py`** (Python 3) to speak the binary TCP protocol. Build the fat JAR first (`mvn package -DskipTests`); the demo scripts run Maven for you if needed.
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/demo-single-node.sh` | End-to-end single-node walkthrough (starts server, runs ops, stops). |
+| `scripts/start-single-node.sh` / `scripts/stop-single-node.sh` | Run or stop one server (default KV port **7777**, data under `demo/data-single`). |
+| `scripts/demo-raft-cluster.sh` | End-to-end 3-node Raft walkthrough (starts cluster, probes roles, runs ops, stops). |
+| `scripts/start-raft-cluster.sh` / `scripts/stop-raft-cluster.sh` | Run or stop three nodes (KV **7777–7779**, Raft **9777–9779**, data under `demo/data-n1` … `n3`). |
+
+Optional environment variables: **`DEMO_VERBOSE=1`** — client prints each TCP hop and `REDIRECT` on stderr; **`DEMO_LEAVE_RUNNING=1`** — leave server(s) up after a demo; **`RAFT_WARMUP_SEC`** (default `5`) — pause after cluster start before the probe and writes.
+
+#### Single-node: what you run and what you see
+
+```bash
+./scripts/demo-single-node.sh
+```
+
+**Behavior:** There is **no Raft**. The server handles PUT, GET, DELETE, RANGE, and BATCH_PUT directly on the local `BitcaskEngine`. You should see **`[demo]`** lines naming each operation and opcode, then **`OK`** / **`NOT_FOUND`** from the client. **GET** prints the value on the next line after **`OK`**. **RANGE** lists matching keys as `key = value`. Deletes are tombstones on disk; a **GET** after **DELETE** returns **`NOT_FOUND`**.
+
+Manual client (server must already be listening):
+
+```bash
+./scripts/kv_client.py --port 7777 put mykey "hello"
+./scripts/kv_client.py --port 7777 get mykey
+```
+
+#### Cluster (Raft): what you run and what you see
+
+```bash
+./scripts/demo-raft-cluster.sh
+```
+
+**Behavior:** Three JVMs elect a **leader**. The script runs a **wire probe** first: one **PUT** per KV port **without** following redirects. Exactly **one** node should report **`role=LEADER`** (the server accepts the write on that replica); the others report **`role=FOLLOWER`** with **`redirect_leader_kv=127.0.0.1:<port>`** pointing at the leader’s **client** port. That matches the protocol: followers respond with **`0x03 REDIRECT`** and the leader’s address.
+
+The script then performs **PUT** / **GET** / **RANGE** / **BATCH_PUT** / **DELETE** using `kv_client`, which **follows redirects automatically**. When the initial contact is a **follower**, you still end with **`OK`** on stdout after the client reconnects to the leader—there is no extra “redirect” line unless you set **`DEMO_VERBOSE=1`**, in which case **`[kv_client]`** on stderr shows the hop to the leader.
+
+A short **JVM log digest** (`Raft node …`, **`became LEADER`**, elections) is printed from `scripts/run/raft-node-*.log`. Those files are **appended** across runs, so older election lines can appear; treat the **probe summary** as the live view of **leader vs followers**.
+
+**Probe only** (global flags must come **before** the subcommand):
+
+```bash
+./scripts/kv_client.py --host 127.0.0.1 probe --kv-ports 7777,7778,7779
+```
 
 ### Run tests
 
