@@ -135,6 +135,8 @@ These live under `scripts/` and use **`scripts/kv_client.py`** (Python 3) to spe
 | `scripts/demo-raft-cluster.sh` | End-to-end 3-node Raft walkthrough (starts cluster, probes roles, runs ops, stops). |
 | `scripts/start-raft-cluster.sh` / `scripts/stop-raft-cluster.sh` | Run or stop three nodes (KV **7777–7779**, Raft **9777–9779**, data under `demo/data-n1` … `n3`). |
 
+The **`start-*` / `stop-*` scripts only launch or stop JVMs** and then return to your shell (they do not run PUT/GET). Use the matching **`demo-*.sh`** script when you want narrated client operations; `start-raft-cluster.sh` prints `[start-raft]` progress and a short “next steps” footer so it is obvious the process is background-only.
+
 Optional environment variables: **`DEMO_VERBOSE=1`** — client prints each TCP hop and `REDIRECT` on stderr; **`DEMO_LEAVE_RUNNING=1`** — leave server(s) up after a demo; **`RAFT_WARMUP_SEC`** (default `5`) — pause after cluster start before the probe and writes.
 
 #### Single-node: what you run and what you see
