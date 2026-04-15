@@ -5,6 +5,7 @@
 #   DEMO_LEAVE_RUNNING=1 — keep cluster running after demo
 #   DEMO_VERBOSE=1       — kv_client logs each TCP hop / REDIRECT on stderr
 #   RAFT_WARMUP_SEC      — seconds after start before probe + writes (default 5)
+#   DEMO_FRESH_DATA=0    — do not delete demo/data-n{1,2,3} before start (default: delete so RANGE is not polluted by prior runs)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -27,6 +28,12 @@ demo_log "Tip: DEMO_VERBOSE=1 enables [kv_client] hop trace on stderr. JVM logs:
 
 (cd "$ROOT" && mvn -q -DskipTests package)
 ensure_jar
+
+BASE="$(demo_root)"
+if [[ "${DEMO_FRESH_DATA:-1}" != "0" ]]; then
+  demo_log "Clearing persisted Raft data under ${BASE}/data-n1 … data-n3 (set DEMO_FRESH_DATA=0 to keep prior demo keys)."
+  rm -rf "${BASE}/data-n1" "${BASE}/data-n2" "${BASE}/data-n3"
+fi
 
 demo_log "Starting three JVMs (start-raft-cluster.sh)..."
 "$SCRIPT_DIR/start-raft-cluster.sh"
@@ -82,11 +89,11 @@ demo_log "OP=PUT raft:a=1 and raft:b=2 via probed leader KV :${LEADER_KV}"
 kv_client --host 127.0.0.1 --port "$LEADER_KV" put raft:a "1"
 kv_client --host 127.0.0.1 --port "$LEADER_KV" put raft:b "2"
 
+demo_log "OP=BATCH_PUT raft:x=10 raft:y=20 via leader KV :${LEADER_KV} (each entry replicated through Raft on leader; before RANGE so the scan includes x,y on a fresh data dir)"
+kv_client --host 127.0.0.1 --port "$LEADER_KV" batch-put raft:x=10 raft:y=20
+
 demo_log "OP=RANGE start=raft:a end=raft:z via leader KV :${LEADER_KV} (leader serves range scan on local BitcaskEngine)"
 kv_client --host 127.0.0.1 --port "$LEADER_KV" range raft:a raft:z
-
-demo_log "OP=BATCH_PUT raft:x=10 raft:y=20 via leader KV :${LEADER_KV} (each entry replicated through Raft on leader)"
-kv_client --host 127.0.0.1 --port "$LEADER_KV" batch-put raft:x=10 raft:y=20
 
 demo_log "OP=GET key=raft:x via leader KV :${LEADER_KV}"
 kv_client --host 127.0.0.1 --port "$LEADER_KV" get raft:x
