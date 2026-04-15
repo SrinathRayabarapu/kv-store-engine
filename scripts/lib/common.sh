@@ -64,6 +64,41 @@ kv_client() {
   fi
 }
 
+# Parse KEY=value lines after "---MACHINE---" from `kv_client probe --machine-trailer` output.
+# Sets: RAFT_PROBE_OK RAFT_LEADER_NODE_ID RAFT_LEADER_KV_PORT RAFT_FOLLOWER_KV_PORTS
+#       RAFT_FIRST_FOLLOWER_KV_PORT RAFT_SECOND_FOLLOWER_KV_PORT (and empty RAFT_PROBE_REASON on success).
+raft_load_machine_trailer() {
+  local text="$1"
+  RAFT_PROBE_OK=
+  RAFT_PROBE_REASON=
+  RAFT_LEADER_NODE_ID=
+  RAFT_LEADER_KV_PORT=
+  RAFT_FOLLOWER_KV_PORTS=
+  RAFT_FIRST_FOLLOWER_KV_PORT=
+  RAFT_SECOND_FOLLOWER_KV_PORT=
+  local in_machine=0
+  local line k v
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "---MACHINE---" ]]; then
+      in_machine=1
+      continue
+    fi
+    [[ "$in_machine" -ne 1 ]] && continue
+    [[ -z "$line" ]] && continue
+    k="${line%%=*}"
+    v="${line#*=}"
+    case "$k" in
+      RAFT_PROBE_OK) RAFT_PROBE_OK="$v" ;;
+      RAFT_PROBE_REASON) RAFT_PROBE_REASON="$v" ;;
+      RAFT_LEADER_NODE_ID) RAFT_LEADER_NODE_ID="$v" ;;
+      RAFT_LEADER_KV_PORT) RAFT_LEADER_KV_PORT="$v" ;;
+      RAFT_FOLLOWER_KV_PORTS) RAFT_FOLLOWER_KV_PORTS="$v" ;;
+      RAFT_FIRST_FOLLOWER_KV_PORT) RAFT_FIRST_FOLLOWER_KV_PORT="$v" ;;
+      RAFT_SECOND_FOLLOWER_KV_PORT) RAFT_SECOND_FOLLOWER_KV_PORT="$v" ;;
+    esac
+  done <<< "$text"
+}
+
 # Grep recent RaftNode election / role lines from per-node JVM logs.
 raft_jvm_log_digest() {
   local run_dir="${1:-$SCRIPT_DIR/run}"
