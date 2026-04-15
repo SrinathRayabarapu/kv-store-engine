@@ -36,11 +36,27 @@ sleep "$RAFT_WARMUP_SEC"
 
 demo_section "Cluster roles (wire-level probe + JVM log digest)"
 demo_log "Probe: one PUT per KV port without following redirects — LEADER returns OK, FOLLOWERS return REDIRECT."
+demo_log "Appends ---MACHINE--- trailer (same pass) so later ops use the live leader/follower KV ports (election is non-deterministic)."
 probe_rc=0
-kv_client --host 127.0.0.1 probe --kv-ports "${P1},${P2},${P3}" || probe_rc=$?
-if [[ "$probe_rc" -ne 0 ]]; then
-  demo_log "Probe exited with rc=$probe_rc (no single leader yet — increase RAFT_WARMUP_SEC and retry)."
+PROBE_OUT=$(kv_client --host 127.0.0.1 probe --kv-ports "${P1},${P2},${P3}" --machine-trailer) || probe_rc=$?
+printf '%s\n' "$PROBE_OUT"
+raft_load_machine_trailer "$PROBE_OUT"
+
+if [[ "$RAFT_PROBE_OK" != "1" ]]; then
+  demo_log "Probe did not classify exactly one leader (RAFT_PROBE_OK=${RAFT_PROBE_OK:-?} ${RAFT_PROBE_REASON:+$RAFT_PROBE_REASON}). Increase RAFT_WARMUP_SEC or check $RUN_DIR/raft-node-*.log"
+  exit 1
 fi
+if [[ -z "$RAFT_FIRST_FOLLOWER_KV_PORT" ]]; then
+  demo_log "No follower returned REDIRECT — need at least one reachable follower to demo follower → leader redirect."
+  exit 1
+fi
+
+LEADER_KV="${RAFT_LEADER_KV_PORT}"
+FOLLOWER_KV="${RAFT_FIRST_FOLLOWER_KV_PORT}"
+# Prefer a second follower for GET if the cluster exposed one (same leader redirect story).
+GET_START_KV="${RAFT_SECOND_FOLLOWER_KV_PORT:-$FOLLOWER_KV}"
+
+demo_log "Resolved from probe: LEADER KV :${LEADER_KV}; redirect demo uses follower KV :${FOLLOWER_KV} (PUT/DELETE). GET initial_contact :${GET_START_KV}."
 
 demo_log "JVM excerpts are from java.util.logging (may include prior restarts in the same log file); wire probe above reflects live roles."
 raft_jvm_log_digest "$RUN_DIR" 12
@@ -49,9 +65,9 @@ demo_section "Operations with narration"
 
 set +e
 
-demo_log "OP=PUT key=raft:interview value=\"replicated-value\" initial_contact=127.0.0.1:$P2 (node 2)"
-demo_log "  Expect: follower returns REDIRECT; kv_client reconnects to leader KV port and completes PUT (Raft replication)."
-kv_client --host 127.0.0.1 --port "$P2" put raft:interview "replicated-value"
+demo_log "OP=PUT key=raft:interview value=\"replicated-value\" initial_contact=127.0.0.1:${FOLLOWER_KV} (probed follower — not hardcoded node 2)"
+demo_log "  Expect: follower returns REDIRECT; kv_client reconnects to leader KV :${LEADER_KV} and completes PUT (Raft replication). Final line is OK from the leader hop."
+kv_client --host 127.0.0.1 --port "$FOLLOWER_KV" put raft:interview "replicated-value"
 rc=$?
 if [[ $rc -ne 0 ]]; then
   set -e
@@ -59,27 +75,27 @@ if [[ $rc -ne 0 ]]; then
   exit "$rc"
 fi
 
-demo_log "OP=GET key=raft:interview initial_contact=127.0.0.1:$P3 (node 3; may redirect to same leader)"
-kv_client --host 127.0.0.1 --port "$P3" get raft:interview
+demo_log "OP=GET key=raft:interview initial_contact=127.0.0.1:${GET_START_KV} (probed follower; may redirect to leader :${LEADER_KV})"
+kv_client --host 127.0.0.1 --port "$GET_START_KV" get raft:interview
 
-demo_log "OP=PUT raft:a=1 and raft:b=2 via initial node 1 (port $P1)"
-kv_client --host 127.0.0.1 --port "$P1" put raft:a "1"
-kv_client --host 127.0.0.1 --port "$P1" put raft:b "2"
+demo_log "OP=PUT raft:a=1 and raft:b=2 via probed leader KV :${LEADER_KV}"
+kv_client --host 127.0.0.1 --port "$LEADER_KV" put raft:a "1"
+kv_client --host 127.0.0.1 --port "$LEADER_KV" put raft:b "2"
 
-demo_log "OP=RANGE start=raft:a end=raft:z via port $P1 (leader serves range scan on local BitcaskEngine)"
-kv_client --host 127.0.0.1 --port "$P1" range raft:a raft:z
+demo_log "OP=RANGE start=raft:a end=raft:z via leader KV :${LEADER_KV} (leader serves range scan on local BitcaskEngine)"
+kv_client --host 127.0.0.1 --port "$LEADER_KV" range raft:a raft:z
 
-demo_log "OP=BATCH_PUT raft:x=10 raft:y=20 via port $P1 (each entry replicated through Raft on leader)"
-kv_client --host 127.0.0.1 --port "$P1" batch-put raft:x=10 raft:y=20
+demo_log "OP=BATCH_PUT raft:x=10 raft:y=20 via leader KV :${LEADER_KV} (each entry replicated through Raft on leader)"
+kv_client --host 127.0.0.1 --port "$LEADER_KV" batch-put raft:x=10 raft:y=20
 
-demo_log "OP=GET key=raft:x via port $P1"
-kv_client --host 127.0.0.1 --port "$P1" get raft:x
+demo_log "OP=GET key=raft:x via leader KV :${LEADER_KV}"
+kv_client --host 127.0.0.1 --port "$LEADER_KV" get raft:x
 
-demo_log "OP=DELETE key=raft:interview via follower port $P2 (redirect to leader, then replicated delete)"
-kv_client --host 127.0.0.1 --port "$P2" delete raft:interview
+demo_log "OP=DELETE key=raft:interview via probed follower KV :${FOLLOWER_KV} (REDIRECT to leader :${LEADER_KV}, then replicated delete)"
+kv_client --host 127.0.0.1 --port "$FOLLOWER_KV" delete raft:interview
 
-demo_log "OP=GET key=raft:interview via port $P1 — expect NOT_FOUND after replicated delete"
-kv_client --host 127.0.0.1 --port "$P1" get raft:interview
+demo_log "OP=GET key=raft:interview via leader KV :${LEADER_KV} — expect NOT_FOUND after replicated delete"
+kv_client --host 127.0.0.1 --port "$LEADER_KV" get raft:interview
 set -e
 
 demo_section "Raft demo complete"

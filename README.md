@@ -162,6 +162,8 @@ Manual client (server must already be listening):
 
 **Behavior:** Three JVMs elect a **leader**. The script runs a **wire probe** first: one **PUT** per KV port **without** following redirects. Exactly **one** node should report **`role=LEADER`** (the server accepts the write on that replica); the others report **`role=FOLLOWER`** with **`redirect_leader_kv=127.0.0.1:<port>`** pointing at the leader’s **client** port. That matches the protocol: followers respond with **`0x03 REDIRECT`** and the leader’s address.
 
+The same probe pass appends a **`---MACHINE---`** trailer (`probe --machine-trailer`) with **`RAFT_LEADER_KV_PORT`** and **`RAFT_FIRST_FOLLOWER_KV_PORT`**. The demo uses those ports for the follow-on operations so **PUT/DELETE “via follower”** and **PUT/RANGE “via leader”** always match **who actually won the election** (leader is not assumed to be node 1 / port 7777).
+
 The script then performs **PUT** / **GET** / **RANGE** / **BATCH_PUT** / **DELETE** using `kv_client`, which **follows redirects automatically**. When the initial contact is a **follower**, you still end with **`OK`** on stdout after the client reconnects to the leader—there is no extra “redirect” line unless you set **`DEMO_VERBOSE=1`**, in which case **`[kv_client]`** on stderr shows the hop to the leader.
 
 A short **JVM log digest** (`Raft node …`, **`became LEADER`**, elections) is printed from `scripts/run/raft-node-*.log`. Those files are **appended** across runs, so older election lines can appear; treat the **probe summary** as the live view of **leader vs followers**.
@@ -170,6 +172,12 @@ A short **JVM log digest** (`Raft node …`, **`became LEADER`**, elections) is 
 
 ```bash
 ./scripts/kv_client.py --host 127.0.0.1 probe --kv-ports 7777,7778,7779
+```
+
+Append machine-readable **`KEY=value`** lines for shell scripts (same single probe pass):
+
+```bash
+./scripts/kv_client.py --host 127.0.0.1 probe --kv-ports 7777,7778,7779 --machine-trailer
 ```
 
 ### Run tests

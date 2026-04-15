@@ -12,7 +12,7 @@ import argparse
 import socket
 import struct
 import sys
-from typing import List, Tuple
+from typing import List, NamedTuple, Tuple
 
 STATUS_OK = 0x00
 STATUS_NOT_FOUND = 0x01
@@ -145,10 +145,82 @@ def _status_name(s: int) -> str:
     return {STATUS_OK: "OK", STATUS_NOT_FOUND: "NOT_FOUND", STATUS_ERROR: "ERROR", STATUS_REDIRECT: "REDIRECT"}.get(s, f"0x{s:02x}")
 
 
-def run_probe(host: str, kv_ports: List[int], timeout: float, verbose: bool = False) -> int:
+class ProbeClusterResult(NamedTuple):
+    """Result of one classification pass (one PUT per KV port, no redirect follow)."""
+
+    node_ids: List[int]
+    kv_ports: List[int]
+    leaders: List[int]
+    followers: List[Tuple[int, int, str, int]]  # node_id, kv_port, redirect_host, redirect_port
+
+
+def probe_cluster(host: str, kv_ports: List[int], timeout: float) -> ProbeClusterResult:
+    probe_key = "__demo_raft_probe__"
+    probe_val = b"."
+    req = _encode_put(probe_key, probe_val)
+    node_ids = list(range(1, len(kv_ports) + 1))
+    leaders: List[int] = []
+    followers: List[Tuple[int, int, str, int]] = []
+
+    for node_id, port in zip(node_ids, kv_ports):
+        try:
+            status, payload = send_once(host, port, req, timeout)
+        except OSError:
+            continue
+        if status == STATUS_OK:
+            leaders.append(node_id)
+        elif status == STATUS_REDIRECT:
+            lh, lp = _decode_redirect(payload)
+            followers.append((node_id, port, lh, lp))
+
+    return ProbeClusterResult(node_ids=node_ids, kv_ports=kv_ports, leaders=leaders, followers=followers)
+
+
+def _print_probe_machine_trailer(result: ProbeClusterResult) -> None:
+    """KEY=value lines for shell scripts (after human probe output)."""
+    node_ids = result.node_ids
+    kv_ports = result.kv_ports
+    leaders = result.leaders
+    followers = result.followers
+
+    print("---MACHINE---")
+    if len(leaders) == 1:
+        lid = leaders[0]
+        lp = kv_ports[lid - 1]
+        f_ports = [str(p) for _, p, _, _ in followers]
+        first_follower_port = followers[0][1] if followers else ""
+        print(f"RAFT_PROBE_OK=1")
+        print(f"RAFT_LEADER_NODE_ID={lid}")
+        print(f"RAFT_LEADER_KV_PORT={lp}")
+        print(f"RAFT_FOLLOWER_KV_PORTS={','.join(f_ports)}")
+        print(f"RAFT_FIRST_FOLLOWER_KV_PORT={first_follower_port}")
+        # Another follower for GET demo (prefer a different port than first if possible)
+        second = followers[1][1] if len(followers) > 1 else (followers[0][1] if followers else "")
+        print(f"RAFT_SECOND_FOLLOWER_KV_PORT={second}")
+    else:
+        print("RAFT_PROBE_OK=0")
+        if len(leaders) == 0:
+            print("RAFT_PROBE_REASON=no_leader")
+        else:
+            print("RAFT_PROBE_REASON=multiple_leaders")
+        print("RAFT_LEADER_NODE_ID=")
+        print("RAFT_LEADER_KV_PORT=")
+        print("RAFT_FOLLOWER_KV_PORTS=")
+        print("RAFT_FIRST_FOLLOWER_KV_PORT=")
+        print("RAFT_SECOND_FOLLOWER_KV_PORT=")
+
+
+def run_probe(
+    host: str,
+    kv_ports: List[int],
+    timeout: float,
+    verbose: bool = False,
+    machine_trailer: bool = False,
+) -> int:
     """
     One PUT per port without following redirects. LEADER returns OK; followers return REDIRECT.
     Prints human-readable lines to stdout for demos.
+    If machine_trailer is True, appends ---MACHINE--- and KEY=value lines for shell scripts.
     """
     probe_key = "__demo_raft_probe__"
     probe_val = b"."
@@ -157,6 +229,7 @@ def run_probe(host: str, kv_ports: List[int], timeout: float, verbose: bool = Fa
 
     print("[probe] Classifying each node with a single PUT (binary op=0x01) — redirects are not followed.")
     leaders: List[int] = []
+    follower_rows: List[Tuple[int, int, str, int]] = []
     for node_id, port in zip(node_ids, kv_ports):
         label = f"node_id={node_id} kv_port={port}"
         if verbose:
@@ -173,6 +246,7 @@ def run_probe(host: str, kv_ports: List[int], timeout: float, verbose: bool = Fa
             leaders.append(node_id)
         elif status == STATUS_REDIRECT:
             lh, lp = _decode_redirect(payload)
+            follower_rows.append((node_id, port, lh, lp))
             if verbose:
                 print(f"[kv_client] probe:   -> REDIRECT leader_kv={lh}:{lp}", file=sys.stderr)
             print(f"[probe] {label} role=FOLLOWER redirect_leader_kv={lh}:{lp}")
@@ -183,17 +257,30 @@ def run_probe(host: str, kv_ports: List[int], timeout: float, verbose: bool = Fa
             print(f"[probe] {label} role=UNEXPECTED status={_status_name(status)}")
 
     print("[probe] Summary:", end="")
+    exit_code = 1
     if len(leaders) == 1:
         lid = leaders[0]
         lp = kv_ports[lid - 1]
         followers = [n for n in node_ids if n != lid]
         print(f" LEADER=node {lid} (KV :{lp}); FOLLOWERS=nodes {followers}")
-        return 0
-    if len(leaders) == 0:
+        exit_code = 0
+    elif len(leaders) == 0:
         print(" no LEADER detected yet (try a longer RAFT_WARMUP_SEC or check logs).")
-        return 1
-    print(f" multiple OK responses ({leaders}) — split-brain or probe race; check cluster.")
-    return 2
+        exit_code = 1
+    else:
+        print(f" multiple OK responses ({leaders}) — split-brain or probe race; check cluster.")
+        exit_code = 2
+
+    if machine_trailer:
+        result = ProbeClusterResult(
+            node_ids=node_ids,
+            kv_ports=kv_ports,
+            leaders=leaders,
+            followers=follower_rows,
+        )
+        _print_probe_machine_trailer(result)
+
+    return exit_code
 
 
 def main() -> int:
@@ -230,6 +317,11 @@ def main() -> int:
         default="7777,7778,7779",
         help="Comma-separated KV client ports (node ids are 1..N in order)",
     )
+    spb.add_argument(
+        "--machine-trailer",
+        action="store_true",
+        help="After human output, append ---MACHINE--- KEY=value lines for shell scripts (same probe pass)",
+    )
 
     args = p.parse_args()
     verbose = bool(args.verbose)
@@ -240,7 +332,13 @@ def main() -> int:
             if not ports:
                 print("probe: no ports parsed from --kv-ports", file=sys.stderr)
                 return 2
-            return run_probe(args.host, ports, args.timeout, verbose=verbose)
+            return run_probe(
+                args.host,
+                ports,
+                args.timeout,
+                verbose=verbose,
+                machine_trailer=bool(args.machine_trailer),
+            )
 
         if args.cmd == "put":
             req = _encode_put(args.key, args.value.encode("utf-8"))
