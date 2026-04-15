@@ -137,7 +137,7 @@ These live under `scripts/` and use **`scripts/kv_client.py`** (Python 3) to spe
 
 The **`start-*` / `stop-*` scripts only launch or stop JVMs** and then return to your shell (they do not run PUT/GET). Use the matching **`demo-*.sh`** script when you want narrated client operations; `start-raft-cluster.sh` prints `[start-raft]` progress and a short “next steps” footer so it is obvious the process is background-only.
 
-Optional environment variables: **`DEMO_VERBOSE=1`** — client prints each TCP hop and `REDIRECT` on stderr; **`DEMO_LEAVE_RUNNING=1`** — leave server(s) up after a demo; **`RAFT_WARMUP_SEC`** (default `5`) — pause after cluster start before the probe and writes.
+Optional environment variables: **`DEMO_VERBOSE=1`** — client prints each TCP hop and `REDIRECT` on stderr; **`DEMO_LEAVE_RUNNING=1`** — leave server(s) up after a demo; **`RAFT_WARMUP_SEC`** (default `5`) — pause after cluster start before the probe and writes; **`DEMO_FRESH_DATA=0`** — keep existing `demo/data-n1` … `n3` between runs (default is to **delete** those dirs before starting the cluster so **RANGE** does not list keys left from an earlier demo, e.g. `raft:x` / `raft:y` before the current run’s **BATCH_PUT**).
 
 #### Single-node: what you run and what you see
 
@@ -163,6 +163,8 @@ Manual client (server must already be listening):
 **Behavior:** Three JVMs elect a **leader**. The script runs a **wire probe** first: one **PUT** per KV port **without** following redirects. Exactly **one** node should report **`role=LEADER`** (the server accepts the write on that replica); the others report **`role=FOLLOWER`** with **`redirect_leader_kv=127.0.0.1:<port>`** pointing at the leader’s **client** port. That matches the protocol: followers respond with **`0x03 REDIRECT`** and the leader’s address.
 
 The same probe pass appends a **`---MACHINE---`** trailer (`probe --machine-trailer`) with **`RAFT_LEADER_KV_PORT`** and **`RAFT_FIRST_FOLLOWER_KV_PORT`**. The demo uses those ports for the follow-on operations so **PUT/DELETE “via follower”** and **PUT/RANGE “via leader”** always match **who actually won the election** (leader is not assumed to be node 1 / port 7777).
+
+By default the demo **clears** `demo/data-n{1,2,3}` before starting JVMs so the **RANGE** output only contains keys written in **this** run. **BATCH_PUT** for `raft:x` / `raft:y` runs **before** **RANGE** so the narration matches the key set. If you keep old data (`DEMO_FRESH_DATA=0`), a previous run’s keys can still appear in **RANGE** “above” the current **BATCH_PUT** line in the log—those are **stale** keys on disk, not a protocol bug.
 
 The script then performs **PUT** / **GET** / **RANGE** / **BATCH_PUT** / **DELETE** using `kv_client`, which **follows redirects automatically**. When the initial contact is a **follower**, you still end with **`OK`** on stdout after the client reconnects to the leader—there is no extra “redirect” line unless you set **`DEMO_VERBOSE=1`**, in which case **`[kv_client]`** on stderr shows the hop to the leader.
 
