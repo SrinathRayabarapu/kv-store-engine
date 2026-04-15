@@ -28,6 +28,8 @@ public class KVStoreMain {
     private static final java.util.logging.Logger LOG = java.util.logging.Logger.getLogger(KVStoreMain.class.getName());
 
     public static void main(String[] args) throws IOException {
+        configureLogging();
+
         int port = 7777;
         String dataDir = "./data";
         long maxFileSize = BitcaskEngine.DEFAULT_MAX_FILE_SIZE;
@@ -137,6 +139,18 @@ public class KVStoreMain {
             Thread.currentThread().join();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Installs {@link LogFormatter} on the root logger so every handler
+     * (console, file redirect) emits single-line, timestamped records.
+     */
+    private static void configureLogging() {
+        LogFormatter formatter = new LogFormatter();
+        java.util.logging.Logger root = java.util.logging.Logger.getLogger("");
+        for (java.util.logging.Handler h : root.getHandlers()) {
+            h.setFormatter(formatter);
         }
     }
 
