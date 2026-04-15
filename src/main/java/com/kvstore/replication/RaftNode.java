@@ -127,6 +127,8 @@ public class RaftNode implements Closeable {
                     if (state == State.CANDIDATE && resp.voteGranted() && resp.term() == currentTerm) {
                         long votes = voteCount.incrementAndGet();
                         int majority = (peerIds.size() + 1) / 2 + 1;
+                        LOG.info("Node " + nodeId + " received vote from peer " + peerId
+                                + " (votes: " + votes + "/" + majority + ", term " + currentTerm + ")");
                         if (votes >= majority) {
                             becomeLeader();
                         }
@@ -157,11 +159,13 @@ public class RaftNode implements Closeable {
     }
 
     private void stepDown(long newTerm) {
+        State oldState = state;
         currentTerm = newTerm;
         state = State.FOLLOWER;
         votedFor = null;
         cancelHeartbeat();
         resetElectionTimer();
+        LOG.info("Node " + nodeId + " stepped down from " + oldState + " to FOLLOWER (term " + newTerm + ")");
     }
 
     // ========== Log Replication (§5.3) ==========
@@ -280,7 +284,8 @@ public class RaftNode implements Closeable {
         if (newCommit > commitIndex) {
             long oldCommit = commitIndex;
             commitIndex = newCommit;
-            // Complete futures for newly committed indices (not lastApplied — that tracks apply lag)
+            LOG.info("Node " + nodeId + " advanced commitIndex " + oldCommit + " -> " + commitIndex
+                    + " (term " + currentTerm + ")");
             for (long idx = oldCommit + 1; idx <= commitIndex; idx++) {
                 CompletableFuture<Boolean> future = pendingWrites.remove(idx);
                 if (future != null) {
@@ -311,6 +316,9 @@ public class RaftNode implements Closeable {
                 resetElectionTimer();
             }
 
+            LOG.info("Node " + nodeId + " " + (voteGranted ? "granted" : "denied")
+                    + " vote to candidate " + request.candidateId() + " for term " + request.term());
+
             return new RaftRpc.VoteResponse(currentTerm, voteGranted);
         } finally {
             stateLock.unlock();
@@ -331,9 +339,15 @@ public class RaftNode implements Closeable {
                 stepDown(request.term());
             }
 
+            Integer previousLeader = leaderId;
             state = State.FOLLOWER;
             leaderId = request.leaderId();
             resetElectionTimer();
+
+            if (!Objects.equals(previousLeader, leaderId)) {
+                LOG.info("Node " + nodeId + " recognized node " + leaderId
+                        + " as LEADER for term " + currentTerm);
+            }
 
             // Check log consistency at prevLogIndex
             if (request.prevLogIndex() > 0) {

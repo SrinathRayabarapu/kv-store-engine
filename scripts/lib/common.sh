@@ -68,7 +68,7 @@ kv_client() {
 raft_jvm_log_digest() {
   local run_dir="${1:-$SCRIPT_DIR/run}"
   local n="${2:-15}"
-  demo_section "JVM logs (RaftNode INFO: startup, elections, leader)"
+  demo_section "JVM logs (Raft state transitions — timestamped)"
   local id f
   for id in 1 2 3; do
     f="$run_dir/raft-node-${id}.log"
@@ -76,17 +76,18 @@ raft_jvm_log_digest() {
       demo_log "raft-node-${id}.log missing (skip)"
       continue
     fi
-    demo_log "file=$f (tail 200 lines, then last ~${n} RaftNode matches — current run)"
+    demo_log "file=$f (tail 200 lines, last ~${n} Raft events)"
     local excerpt
-    excerpt=$(tail -n 200 "$f" 2>/dev/null | grep -E "Raft node |became LEADER|starting election" 2>/dev/null | tail -n "$n" || true)
+    excerpt=$(tail -n 200 "$f" 2>/dev/null \
+      | grep -E "started as FOLLOWER|became LEADER|starting election|stepped down|granted vote|denied vote|recognized .* as LEADER|advanced commitIndex|Raft cluster member" 2>/dev/null \
+      | tail -n "$n" || true)
     if [[ -z "${excerpt//[$'\t\r\n ']/}" ]]; then
-      demo_log "  (no matching RaftNode lines in this file yet)"
+      demo_log "  (no matching Raft lines in this file yet)"
       continue
     fi
     while IFS= read -r line; do
       [[ -z "${line// }" ]] && continue
-      # Strip default java.util.logging prefix up through "INFO: " for readability.
-      demo_log "  (node${id}) ${line#*INFO: }"
+      demo_log "  (node${id}) $line"
     done <<< "$excerpt"
   done
 }
