@@ -1,5 +1,7 @@
 package com.kvstore.network;
 
+import com.kvstore.engine.BitcaskEngine;
+import com.kvstore.engine.Compactor;
 import com.kvstore.engine.StorageEngine;
 import com.kvstore.replication.LogEntry;
 import com.kvstore.replication.RaftNode;
@@ -29,14 +31,25 @@ public class RequestHandler {
 
     private final StorageEngine engine;
     private final RaftRouting raft;
+    /** When non-null, {@link Protocol#OP_COMPACT} merges local data files on this node. */
+    private final Compactor compactor;
 
     public RequestHandler(StorageEngine engine) {
-        this(engine, null);
+        this(engine, null, null);
     }
 
     public RequestHandler(StorageEngine engine, RaftRouting raft) {
+        this(engine, raft, null);
+    }
+
+    public RequestHandler(StorageEngine engine, Compactor compactor) {
+        this(engine, null, compactor);
+    }
+
+    public RequestHandler(StorageEngine engine, RaftRouting raft, Compactor compactor) {
         this.engine = engine;
         this.raft = raft;
+        this.compactor = compactor;
     }
 
     /**
@@ -50,6 +63,7 @@ public class RequestHandler {
                 case Protocol.OP_DELETE -> handleDelete(request.payload());
                 case Protocol.OP_RANGE -> handleRange(request.payload());
                 case Protocol.OP_BATCH_PUT -> handleBatchPut(request.payload());
+                case Protocol.OP_COMPACT -> handleCompact();
                 default -> Protocol.encodeError("Unknown opcode: " + request.opCode());
             };
         } catch (Exception e) {
@@ -148,5 +162,19 @@ public class RequestHandler {
         }
         engine.batchPut(keys, values);
         return Protocol.encodeOkEmpty();
+    }
+
+    /**
+     * Runs local compaction on this node. Not a Raft command — followers compact their own disks.
+     */
+    private byte[] handleCompact() {
+        if (compactor == null) {
+            return Protocol.encodeError("Compaction not configured");
+        }
+        if (!(engine instanceof BitcaskEngine bitcask)) {
+            return Protocol.encodeError("Compaction requires BitcaskEngine");
+        }
+        long reclaimed = bitcask.compact(compactor);
+        return Protocol.encodeOkLong(reclaimed);
     }
 }

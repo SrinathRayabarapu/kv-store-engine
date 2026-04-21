@@ -6,7 +6,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * A Bitcask-inspired persistent key/value storage engine.
@@ -41,14 +42,15 @@ public class BitcaskEngine implements StorageEngine {
 
     /** Default max file size before rotation: 256 MB. */
     public static final long DEFAULT_MAX_FILE_SIZE = 256 * 1024 * 1024L;
+//    public static final long DEFAULT_MAX_FILE_SIZE = 256;
 
     private final Path dataDir;
     private final KeyDir keyDir;
     private final long maxFileSize;
     private final AtomicLong fileIdSeq;
-    private final ReentrantLock writeLock = new ReentrantLock();
+    private final ReadWriteLock lock = new ReentrantReadWriteLock();
 
-    /** The currently active (writable) data file. Protected by writeLock. */
+    /** The currently active (writable) data file. Protected by {@link #lock} write side. */
     private DataFile activeFile;
 
     /** All open data files (active + immutable), keyed by fileId. */
@@ -98,7 +100,7 @@ public class BitcaskEngine implements StorageEngine {
         byte[] record = RecordSerializer.serialize(key, value, timestamp);
         int recordSize = record.length;
 
-        writeLock.lock();
+        lock.writeLock().lock();
         try {
             // Track dead bytes from the overwritten entry (if any) for compaction threshold
             keyDir.get(key).ifPresent(oldEntry ->
@@ -109,7 +111,7 @@ public class BitcaskEngine implements StorageEngine {
             keyDir.put(key, new KeyDirEntry(
                     activeFile.getFileId(), value.length, offset, recordSize, timestamp));
         } finally {
-            writeLock.unlock();
+            lock.writeLock().unlock();
         }
     }
 
@@ -117,20 +119,25 @@ public class BitcaskEngine implements StorageEngine {
     public Optional<byte[]> get(String key) {
         Objects.requireNonNull(key, "key must not be null");
 
-        Optional<KeyDirEntry> entryOpt = keyDir.get(key);
-        if (entryOpt.isEmpty()) {
-            return Optional.empty();
-        }
+        lock.readLock().lock();
+        try {
+            Optional<KeyDirEntry> entryOpt = keyDir.get(key);
+            if (entryOpt.isEmpty()) {
+                return Optional.empty();
+            }
 
-        KeyDirEntry entry = entryOpt.get();
-        DataFile file = dataFiles.get(entry.fileId());
-        if (file == null) {
-            return Optional.empty();
-        }
+            KeyDirEntry entry = entryOpt.get();
+            DataFile file = dataFiles.get(entry.fileId());
+            if (file == null) {
+                return Optional.empty();
+            }
 
-        byte[] raw = file.read(entry.valueOffset(), entry.recordSize());
-        RecordSerializer.DeserializedRecord record = RecordSerializer.deserialize(raw);
-        return Optional.of(record.value());
+            byte[] raw = file.read(entry.valueOffset(), entry.recordSize());
+            RecordSerializer.DeserializedRecord record = RecordSerializer.deserialize(raw);
+            return Optional.of(record.value());
+        } finally {
+            lock.readLock().unlock();
+        }
     }
 
     @Override
@@ -138,20 +145,25 @@ public class BitcaskEngine implements StorageEngine {
         Objects.requireNonNull(startKey, "startKey must not be null");
         Objects.requireNonNull(endKey, "endKey must not be null");
 
-        List<Map.Entry<String, KeyDirEntry>> entries = keyDir.getRange(startKey, endKey);
-        List<Map.Entry<String, byte[]>> result = new ArrayList<>(entries.size());
+        lock.readLock().lock();
+        try {
+            List<Map.Entry<String, KeyDirEntry>> entries = keyDir.getRange(startKey, endKey);
+            List<Map.Entry<String, byte[]>> result = new ArrayList<>(entries.size());
 
-        for (Map.Entry<String, KeyDirEntry> e : entries) {
-            KeyDirEntry entry = e.getValue();
-            DataFile file = dataFiles.get(entry.fileId());
-            if (file == null) continue;
+            for (Map.Entry<String, KeyDirEntry> e : entries) {
+                KeyDirEntry entry = e.getValue();
+                DataFile file = dataFiles.get(entry.fileId());
+                if (file == null) continue;
 
-            byte[] raw = file.read(entry.valueOffset(), entry.recordSize());
-            RecordSerializer.DeserializedRecord record = RecordSerializer.deserialize(raw);
-            result.add(Map.entry(e.getKey(), record.value()));
+                byte[] raw = file.read(entry.valueOffset(), entry.recordSize());
+                RecordSerializer.DeserializedRecord record = RecordSerializer.deserialize(raw);
+                result.add(Map.entry(e.getKey(), record.value()));
+            }
+
+            return result;
+        } finally {
+            lock.readLock().unlock();
         }
-
-        return result;
     }
 
     @Override
@@ -164,7 +176,7 @@ public class BitcaskEngine implements StorageEngine {
         }
 
         long timestamp = System.currentTimeMillis();
-        writeLock.lock();
+        lock.writeLock().lock();
         try {
             for (int i = 0; i < keys.size(); i++) {
                 String key = keys.get(i);
@@ -178,7 +190,7 @@ public class BitcaskEngine implements StorageEngine {
                         activeFile.getFileId(), value.length, offset, recordSize, timestamp));
             }
         } finally {
-            writeLock.unlock();
+            lock.writeLock().unlock();
         }
     }
 
@@ -189,7 +201,7 @@ public class BitcaskEngine implements StorageEngine {
         long timestamp = System.currentTimeMillis();
         byte[] tombstone = RecordSerializer.serializeTombstone(key, timestamp);
 
-        writeLock.lock();
+        lock.writeLock().lock();
         try {
             // Track dead bytes from the old entry (if any) for compaction decisions
             keyDir.get(key).ifPresent(oldEntry ->
@@ -199,20 +211,62 @@ public class BitcaskEngine implements StorageEngine {
             activeFile.append(tombstone);
             keyDir.remove(key);
         } finally {
-            writeLock.unlock();
+            lock.writeLock().unlock();
         }
     }
 
     @Override
     public void close() {
-        writeLock.lock();
+        lock.writeLock().lock();
         try {
             for (DataFile df : dataFiles.values()) {
                 df.close();
             }
             dataFiles.clear();
         } finally {
-            writeLock.unlock();
+            lock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Returns whether immutable files have enough dead data to justify compaction.
+     * Thread-safe; holds a read lock while evaluating.
+     */
+    public boolean shouldCompact(Compactor compactor) {
+        Objects.requireNonNull(compactor, "compactor");
+        lock.readLock().lock();
+        try {
+            return compactor.shouldCompact();
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Runs one compaction cycle. Thread-safe; holds the write lock for the full merge
+     * so file map and {@link KeyDir} stay consistent with concurrent readers and writers.
+     */
+    public long compact(Compactor compactor) {
+        Objects.requireNonNull(compactor, "compactor");
+        lock.writeLock().lock();
+        try {
+            return compactor.compact();
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Rotates to a new active data file (syncs the current file first). Exposed for tests
+     * and diagnostics — not required for normal clients.
+     */
+    public void rotateActiveFileForTests() {
+        lock.writeLock().lock();
+        try {
+            activeFile.sync();
+            activeFile = openNewDataFile();
+        } finally {
+            lock.writeLock().unlock();
         }
     }
 
@@ -274,7 +328,7 @@ public class BitcaskEngine implements StorageEngine {
 
     /**
      * Rotates to a new data file if the current one would exceed the max size.
-     * Must be called under writeLock.
+     * Must be called while holding {@link #lock}'s write lock.
      */
     private void rotateIfNeeded(int recordSize) {
         if (activeFile.getWriteOffset() + recordSize > maxFileSize) {

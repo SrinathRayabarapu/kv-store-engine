@@ -1,6 +1,7 @@
 package com.kvstore.network;
 
 import com.kvstore.engine.BitcaskEngine;
+import com.kvstore.engine.Compactor;
 import com.kvstore.replication.RaftNode;
 import com.kvstore.replication.RaftRpcServer;
 import com.kvstore.replication.TcpRaftRpc;
@@ -124,7 +125,7 @@ class Step9_RaftTcpClusterIntegrationTest {
         rs.start();
         node.start();
         RaftRouting routing = new RaftRouting(node, new HashMap<>(allClients));
-        KVServer kv = new KVServer(kvPort, new RequestHandler(engine, routing));
+        KVServer kv = new KVServer(kvPort, new RequestHandler(engine, routing, new Compactor(engine)));
         kv.start();
 
         nodes.add(node);

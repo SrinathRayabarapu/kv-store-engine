@@ -31,7 +31,7 @@ class Step5_CompactionTest {
             }
 
             // Force a file rotation so the original data is in immutable files
-            forceRotation(engine);
+            engine.rotateActiveFileForTests();
 
             long sizeBeforeOverwrite = totalDataFileSize(engine);
 
@@ -41,10 +41,10 @@ class Step5_CompactionTest {
             }
 
             // Force another rotation
-            forceRotation(engine);
+            engine.rotateActiveFileForTests();
 
             Compactor compactor = new Compactor(engine);
-            long reclaimed = compactor.compact();
+            long reclaimed = engine.compact(compactor);
 
             assertTrue(reclaimed > 0, "Compaction should reclaim some bytes");
 
@@ -66,17 +66,17 @@ class Step5_CompactionTest {
             for (int i = 0; i < 100; i++) {
                 engine.put("key-" + i, ("v1-" + i).getBytes());
             }
-            forceRotation(engine);
+            engine.rotateActiveFileForTests();
 
             // Overwrite half the keys
             for (int i = 0; i < 50; i++) {
                 engine.put("key-" + i, ("v2-" + i).getBytes());
             }
-            forceRotation(engine);
+            engine.rotateActiveFileForTests();
 
             // Run compaction
             Compactor compactor = new Compactor(engine);
-            compactor.compact();
+            engine.compact(compactor);
 
             // Verify: first 50 have v2, rest have v1
             for (int i = 0; i < 50; i++) {
@@ -98,16 +98,16 @@ class Step5_CompactionTest {
             for (int i = 0; i < 50; i++) {
                 engine.put("key-" + i, ("value-" + i).getBytes());
             }
-            forceRotation(engine);
+            engine.rotateActiveFileForTests();
 
             // Delete some keys
             for (int i = 0; i < 25; i++) {
                 engine.delete("key-" + i);
             }
-            forceRotation(engine);
+            engine.rotateActiveFileForTests();
 
             Compactor compactor = new Compactor(engine);
-            compactor.compact();
+            engine.compact(compactor);
 
             for (int i = 0; i < 25; i++) {
                 assertTrue(engine.get("key-" + i).isEmpty(),
@@ -129,7 +129,7 @@ class Step5_CompactionTest {
             for (int i = 0; i < 50; i++) {
                 engine.put("key-" + i, ("value-" + i).getBytes());
             }
-            forceRotation(engine);
+            engine.rotateActiveFileForTests();
 
             // Overwrite all — creates ~100% dead bytes in immutable file
             for (int i = 0; i < 50; i++) {
@@ -137,7 +137,7 @@ class Step5_CompactionTest {
             }
 
             Compactor compactor = new Compactor(engine, 0.5);
-            assertTrue(compactor.shouldCompact(),
+            assertTrue(engine.shouldCompact(compactor),
                     "Should compact when dead bytes exceed 50% of immutable files");
         }
     }
@@ -149,7 +149,7 @@ class Step5_CompactionTest {
             engine.put("only-key", "only-value".getBytes());
 
             Compactor compactor = new Compactor(engine);
-            long reclaimed = compactor.compact();
+            long reclaimed = engine.compact(compactor);
 
             assertEquals(0, reclaimed);
             assertArrayEquals("only-value".getBytes(),
@@ -165,13 +165,13 @@ class Step5_CompactionTest {
             for (int i = 0; i < 100; i++) {
                 engine.put("key-" + i, ("value-" + i).getBytes());
             }
-            forceRotation(engine);
+            engine.rotateActiveFileForTests();
 
             int fileCountBefore = engine.getDataFiles().size();
             assertTrue(fileCountBefore > 2, "Expected multiple files before compaction");
 
             Compactor compactor = new Compactor(engine);
-            compactor.compact();
+            engine.compact(compactor);
 
             // After compaction: active file + compacted file (old immutable files removed)
             int fileCountAfter = engine.getDataFiles().size();
@@ -179,15 +179,6 @@ class Step5_CompactionTest {
                     "File count should decrease after compaction: before=" + fileCountBefore
                             + ", after=" + fileCountAfter);
         }
-    }
-
-    /**
-     * Forces the engine to rotate the active file by writing a record that
-     * exceeds the remaining space, or by directly opening a new active file.
-     */
-    private void forceRotation(BitcaskEngine engine) {
-        DataFile newActive = engine.openNewDataFile();
-        engine.setActiveFile(newActive);
     }
 
     private long totalDataFileSize(BitcaskEngine engine) {
