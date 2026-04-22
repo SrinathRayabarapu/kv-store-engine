@@ -2,6 +2,7 @@ package com.kvstore.network;
 
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -33,6 +34,8 @@ public final class Protocol {
     public static final byte OP_DELETE    = 0x03;
     public static final byte OP_RANGE     = 0x04;
     public static final byte OP_BATCH_PUT = 0x05;
+    /** Local maintenance: merge immutable files (not replicated through Raft). */
+    public static final byte OP_COMPACT     = 0x06;
 
     public static final byte STATUS_OK        = 0x00;
     public static final byte STATUS_NOT_FOUND = 0x01;
@@ -116,6 +119,14 @@ public final class Protocol {
         return buf.array();
     }
 
+    /** Empty payload — compaction runs on this node only. */
+    public static byte[] encodeCompactRequest() {
+        ByteBuffer buf = ByteBuffer.allocate(REQUEST_HEADER_SIZE);
+        buf.put(OP_COMPACT);
+        buf.putInt(0);
+        return buf.array();
+    }
+
     // --- Response encoding (server side) ---
 
     public static byte[] encodeResponse(byte status, byte[] payload) {
@@ -132,6 +143,20 @@ public final class Protocol {
 
     public static byte[] encodeOkEmpty() {
         return encodeResponse(STATUS_OK, new byte[0]);
+    }
+
+    /** OK response with a signed 64-bit count (big-endian). */
+    public static byte[] encodeOkLong(long value) {
+        ByteBuffer p = ByteBuffer.allocate(8).order(ByteOrder.BIG_ENDIAN);
+        p.putLong(value);
+        return encodeOk(p.array());
+    }
+
+    public static long decodeOkLongPayload(byte[] payload) {
+        if (payload == null || payload.length != 8) {
+            throw new IllegalArgumentException("expected 8-byte payload");
+        }
+        return ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN).getLong();
     }
 
     public static byte[] encodeNotFound() {

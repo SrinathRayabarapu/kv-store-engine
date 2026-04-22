@@ -1,6 +1,7 @@
 package com.kvstore.network;
 
 import com.kvstore.engine.BitcaskEngine;
+import com.kvstore.engine.Compactor;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -112,6 +113,43 @@ class Step7_NetworkIntegrationTest {
             assertEquals("apple", entries.get(0).getKey());
             assertEquals("banana", entries.get(1).getKey());
             assertEquals("cherry", entries.get(2).getKey());
+        }
+    }
+
+    @Test
+    @DisplayName("COMPACT over TCP returns OK with reclaimed byte count (local maintenance)")
+    void compact_overTcp() throws Exception {
+        Path sub = tempDir.resolve("compact-tcp");
+        int p = findFreePort();
+        BitcaskEngine eng = new BitcaskEngine(sub, 512);
+        Compactor comp = new Compactor(eng);
+        KVServer srv = new KVServer(p, new RequestHandler(eng, comp));
+        srv.start();
+        Thread.sleep(100);
+        try (SocketChannel client = SocketChannel.open()) {
+            client.connect(new InetSocketAddress("localhost", p));
+            client.configureBlocking(true);
+            for (int i = 0; i < 20; i++) {
+                send(client, Protocol.encodePutRequest("c-key-" + i, ("v-" + i).getBytes()));
+                readResponse(client);
+            }
+            eng.rotateActiveFileForTests();
+            for (int i = 0; i < 20; i++) {
+                send(client, Protocol.encodePutRequest("c-key-" + i, ("v2-" + i).getBytes()));
+                readResponse(client);
+            }
+            send(client, Protocol.encodeCompactRequest());
+            Protocol.ParsedResponse resp = readResponse(client);
+            assertEquals(Protocol.STATUS_OK, resp.status());
+            long reclaimed = Protocol.decodeOkLongPayload(resp.payload());
+            assertTrue(reclaimed >= 0);
+            send(client, Protocol.encodeGetRequest("c-key-0"));
+            Protocol.ParsedResponse getResp = readResponse(client);
+            assertEquals(Protocol.STATUS_OK, getResp.status());
+            assertTrue(new String(getResp.payload(), StandardCharsets.UTF_8).startsWith("v2-"));
+        } finally {
+            srv.close();
+            eng.close();
         }
     }
 

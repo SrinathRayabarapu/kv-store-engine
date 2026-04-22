@@ -1,6 +1,8 @@
 package com.kvstore;
 
 import com.kvstore.engine.BitcaskEngine;
+import com.kvstore.engine.CompactionScheduler;
+import com.kvstore.engine.Compactor;
 import com.kvstore.engine.CrashRecovery;
 import com.kvstore.network.KVServer;
 import com.kvstore.network.RaftRouting;
@@ -33,6 +35,8 @@ public class KVStoreMain {
         int port = 7777;
         String dataDir = "./data";
         long maxFileSize = BitcaskEngine.DEFAULT_MAX_FILE_SIZE;
+        long compactIntervalSec = 60;
+        double compactDeadRatio = 0.5;
         Integer nodeId = null;
         Integer raftPort = null;
         String advertiseHost = "127.0.0.1";
@@ -43,6 +47,8 @@ public class KVStoreMain {
                 case "--port" -> port = Integer.parseInt(args[++i]);
                 case "--data-dir" -> dataDir = args[++i];
                 case "--max-file-size" -> maxFileSize = Long.parseLong(args[++i]);
+                case "--compact-interval-sec" -> compactIntervalSec = Long.parseLong(args[++i]);
+                case "--compact-dead-ratio" -> compactDeadRatio = Double.parseDouble(args[++i]);
                 case "--node-id" -> nodeId = Integer.parseInt(args[++i]);
                 case "--raft-port" -> raftPort = Integer.parseInt(args[++i]);
                 case "--advertise-host" -> advertiseHost = args[++i];
@@ -70,6 +76,9 @@ public class KVStoreMain {
 
         Path dataDirPath = Path.of(dataDir);
         BitcaskEngine engine = new BitcaskEngine(dataDirPath, maxFileSize);
+        Compactor compactor = new Compactor(engine, compactDeadRatio);
+        CompactionScheduler compactionScheduler =
+                compactIntervalSec > 0 ? new CompactionScheduler(engine, compactor, compactIntervalSec) : null;
 
         if (dataDirPath.toFile().exists() && Objects.requireNonNullElse(dataDirPath.toFile().list(), new String[0]).length > 0) {
             LOG.info("Existing data directory found — running recovery...");
@@ -102,24 +111,35 @@ public class KVStoreMain {
             raftNode.start();
 
             RaftRouting routing = new RaftRouting(raftNode, clientAddrs);
-            server = new KVServer(port, new RequestHandler(engine, routing));
+            server = new KVServer(port, new RequestHandler(engine, routing, compactor));
             LOG.info("Raft cluster member nodeId=" + nodeId + " raftPort=" + raftPort + " clientPort=" + port);
         } else {
-            server = new KVServer(port, engine);
+            server = new KVServer(port, new RequestHandler(engine, compactor));
         }
 
         server.start();
 
         LOG.info("KV Store Engine running on port " + port + " — data dir: " + dataDir);
+        if (compactionScheduler != null) {
+            LOG.info("Compaction scheduler: every " + compactIntervalSec + "s, dead-bytes ratio threshold "
+                    + compactDeadRatio);
+        } else {
+            LOG.info("Scheduled compaction disabled (use --compact-interval-sec > 0 to enable)");
+        }
         LOG.info("Press Ctrl+C to stop");
 
         final BitcaskEngine finalEngine = engine;
+        final CompactionScheduler finalCompaction = compactionScheduler;
         final KVServer finalServer = server;
         final RaftRpcServer finalRaftSrv = raftServer;
         final RaftNode finalRaft = raftNode;
         final TcpRaftRpc finalTcp = tcpRaft;
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            LOG.info("Shutdown signal received — writing hint files...");
+            LOG.info("Shutdown signal received — stopping compaction...");
+            if (finalCompaction != null) {
+                finalCompaction.close();
+            }
+            LOG.info("Writing hint files...");
             CrashRecovery.writeHintFiles(finalEngine);
             finalServer.close();
             if (finalRaftSrv != null) {
@@ -195,6 +215,8 @@ public class KVStoreMain {
                   --port <n>              KV client TCP port (default: 7777)
                   --data-dir <path>       Data directory (default: ./data)
                   --max-file-size <bytes> Max data file size before rotation (default: 268435456)
+                  --compact-interval-sec <n>  Periodic compaction check interval; 0 disables (default: 60)
+                  --compact-dead-ratio <r>    Dead bytes / immutable bytes to trigger compaction (default: 0.5)
                   --node-id <n>           Raft member id (required with --raft-port / --peer)
                   --raft-port <n>         TCP port for Raft RPC (RequestVote / AppendEntries)
                   --peer <spec>           Remote member: id@host:raftPort:clientPort (repeat)

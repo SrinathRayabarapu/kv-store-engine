@@ -80,9 +80,8 @@ public class Compactor {
     /**
      * Runs one compaction cycle. Returns the number of bytes reclaimed.
      *
-     * <p>This method is NOT thread-safe with respect to the engine — the
-     * caller should ensure no structural changes (like close) happen concurrently.
-     * The engine's write lock is acquired only during the atomic swap phase.
+     * <p>Call only via {@link BitcaskEngine#compact(Compactor)} so the engine's
+     * read/write lock serializes this with gets, puts, deletes, and close.
      */
     public long compact() {
         String activeFileId = engine.getActiveFile().getFileId();
